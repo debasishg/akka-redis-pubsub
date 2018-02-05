@@ -4,104 +4,168 @@
 
 package sample.pubsub
 
-import com.redis.{RedisClient, PubSubMessage, S, U, M}
+import com.redis.{E, M, PubSubMessage, RedisClient, S, U}
 import akka.persistence.redis._
-import akka.actor.Actor._
+import akka.actor.{Actor, ActorSystem, Props}
+
+import scala.concurrent.Await
+import scala.concurrent.duration.Duration
 
 /**
- * Sample Akka application for Redis PubSub
- *
- * Prerequisite: Need Redis Server running (the version that supports pubsub)
- * <pre>
- * 1. Download redis from http://github.com/antirez/redis
- * 2. build using "make"
- * 3. Run server as ./redis-server
- * </pre>
- *
- * For running this sample application :-
- *
- * <pre>
- * 1. Open a shell and set AKKA_HOME to the distribution root
- * 2. cd $AKKA_HOME
- * 3. sbt console
- * 4. import sample.pubsub._
- * 5. Sub.sub("a", "b") // starts Subscription server & subscribes to channels "a" and "b"
- *
- * 6. Open up another shell similarly as the above and set AKKA_HOME
- * 7. cd $AKKA_HOME
- * 8. sbt console
- * 9. import sample.pubsub._
- * 10. Pub.publish("a", "hello") // the first shell should get the message
- * 11. Pub.publish("c", "hi") // the first shell should NOT get this message
- *
- * 12. Open up a redis-client from where you installed redis and issue a publish command
- *     ./redis-cli publish a "hi there" ## the first shell should get the message
- *
- * 13. Go back to the first shell
- * 14. Sub.unsub("a") // should unsubscribe the first shell from channel "a"
- *
- * 15. Study the callback function defined below. It supports many other message formats.
- *     In the second shell window do the following:
- *     scala> Pub.publish("b", "+c")  // will subscribe the first window to channel "c"
- *     scala> Pub.publish("b", "+d")  // will subscribe the first window to channel "d"
- *     scala> Pub.publish("b", "-c")  // will unsubscribe the first window from channel "c"
- *     scala> Pub.publish("b", "exit")  // will unsubscribe the first window from all channels
- * </pre>
- */
+  * Sample Akka application for Redis PubSub
+  *
+  * Prerequisite: Need Redis Server running (the version that supports pubsub)
+  * <pre>
+  * 1. Download redis from http://github.com/antirez/redis
+  * 2. build using "make"
+  * 3. Run server as ./redis-server
+  * </pre>
+  *
+  * For running this sample application :-
+  *
+  * <pre>
+  * In `sbt console`:
+  scala> import sample.pubsub._
+  import sample.pubsub._
 
-object Pub {
+  scala> import akka.actor.{ Actor, ActorSystem, Props }
+  import akka.actor.{Actor, ActorSystem, Props}
+
+  scala> val ps = ActorSystem("pub")
+  ps: akka.actor.ActorSystem = akka://pub
+
+  scala> val ss = ActorSystem("sub")
+  ss: akka.actor.ActorSystem = akka://sub
+
+  scala> val p = ps.actorOf(Props(new Pub))
+  p: akka.actor.ActorRef = Actor[akka://pub/user/$a#2075877062]
+
+  scala> starting publishing service ..
+
+
+  scala> val s = ss.actorOf(Props(new Sub))
+  s: akka.actor.ActorRef = Actor[akka://sub/user/$a#724245975]
+
+  scala> starting subscription service ..
+  Got in Sub true
+
+
+  scala> p ! PublishMessage("a", "hello world")
+
+  scala> Got in Pub true
+
+
+  scala> s ! SubscribeMessage(List("a"))
+
+  scala> Got in Sub true
+  subscribed to a and count = 1
+
+  $ ./redis-cli
+  redis 127.0.0.1:6379> publish a "hi there"
+  (integer) 1
+
+  scala> p ! PublishMessage("b", "+c")
+
+  scala> Got in Pub true
+
+
+  scala> p ! PublishMessage("b", "+d")
+
+  scala> Got in Pub true
+
+
+  scala> p ! PublishMessage("b", "-c")
+
+  scala> Got in Pub true
+
+
+  scala> p ! PublishMessage("b", "exit")
+
+  scala> Got in Pub true
+  </pre>
+  **/
+
+
+case class PublishMessage(channel: String, message: String)
+case class SubscribeMessage(channels: List[String])
+case class UnsubscribeMessage(channels: List[String])
+case object GoDown
+
+class Pub extends Actor {
   println("starting publishing service ..")
+  val system = ActorSystem("pub")
   val r = new RedisClient("localhost", 6379)
-  val p = actorOf(new Publisher(r))
-  p.start
+  val p = system.actorOf(Props(new Publisher(r)))
+
+  def receive = {
+    case PublishMessage(ch, msg) => publish(ch, msg)
+    case GoDown => 
+      r.quit
+      Await.result(system.terminate(), Duration.Inf)
+
+    case x => println("Got in Pub " + x)
+  }
 
   def publish(channel: String, message: String) = {
     p ! Publish(channel, message)
   }
 }
 
-object Sub {
-  println("starting subscription service ..")
-  val r = new RedisClient("localhost", 6379)
-  val s = actorOf(new Subscriber(r))
-  s.start
-  s ! Register(callback)
 
-  def sub(channels: String*) = {
+class Sub extends Actor {
+  println("starting subscription service ..")
+  val system = ActorSystem("sub")
+  val r = new RedisClient("localhost", 6379)
+  val s = system.actorOf(Props(new Subscriber(r)))
+  s ! Register(callback) 
+
+  def receive = {
+    case SubscribeMessage(chs) => sub(chs)
+    case UnsubscribeMessage(chs) => unsub(chs)
+    case GoDown => 
+      r.quit
+      Await.result(system.terminate(), Duration.Inf)
+
+    case x => println("Got in Sub " + x)
+  }
+
+  def sub(channels: List[String]) = {
     s ! Subscribe(channels.toArray)
   }
 
-  def unsub(channels: String*) = {
+  def unsub(channels: List[String]) = {
     s ! Unsubscribe(channels.toArray)
   }
 
   def callback(pubsub: PubSubMessage) = pubsub match {
+    case E(exception) => println("Fatal error caused consumer dead. Please init new consumer reconnecting to master or connect to backup")
     case S(channel, no) => println("subscribed to " + channel + " and count = " + no)
     case U(channel, no) => println("unsubscribed from " + channel + " and count = " + no)
-    case M(channel, msg) =>
+    case M(channel, msg) => 
       msg match {
         // exit will unsubscribe from all channels and stop subscription service
-        case "exit" =>
+        case "exit" => 
           println("unsubscribe all ..")
           r.unsubscribe
 
         // message "+x" will subscribe to channel x
-        case x if x startsWith "+" =>
+        case x if x startsWith "+" => 
           val s: Seq[Char] = x
           s match {
             case Seq('+', rest @ _*) => r.subscribe(rest.toString){ m => }
           }
 
         // message "-x" will unsubscribe from channel x
-        case x if x startsWith "-" =>
+        case x if x startsWith "-" => 
           val s: Seq[Char] = x
           s match {
             case Seq('-', rest @ _*) => r.unsubscribe(rest.toString)
           }
 
         // other message receive
-        case x =>
+        case x => 
           println("received message on channel " + channel + " as : " + x)
       }
   }
 }
+
