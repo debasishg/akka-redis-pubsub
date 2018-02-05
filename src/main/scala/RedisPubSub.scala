@@ -8,6 +8,9 @@ import com.redis.{E, M, PubSubMessage, RedisClient, S, U}
 import akka.persistence.redis._
 import akka.actor.{Actor, ActorSystem, Props}
 
+import scala.concurrent.Await
+import scala.concurrent.duration.Duration
+
 /**
   * Sample Akka application for Redis PubSub
   *
@@ -98,8 +101,7 @@ class Pub extends Actor {
     case PublishMessage(ch, msg) => publish(ch, msg)
     case GoDown => 
       r.quit
-      system.shutdown()
-      system.awaitTermination()
+      Await.result(system.terminate(), Duration.Inf)
 
     case x => println("Got in Pub " + x)
   }
@@ -122,8 +124,7 @@ class Sub extends Actor {
     case UnsubscribeMessage(chs) => unsub(chs)
     case GoDown => 
       r.quit
-      system.shutdown()
-      system.awaitTermination()
+      Await.result(system.terminate(), Duration.Inf)
 
     case x => println("Got in Sub " + x)
   }
